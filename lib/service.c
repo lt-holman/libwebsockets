@@ -396,12 +396,37 @@ user_service_go_again:
 	wsi2 = wsi;
 	do {
 		wsi2 = wsi2->u.http2.next_child_wsi;
-		lwsl_info("%s: child %p\n", __func__, wsi2);
 		if (!wsi2)
 			continue;
 		if (!wsi2->u.http2.requested_POLLOUT)
 			continue;
 		wsi2->u.http2.requested_POLLOUT = 0;
+
+		lwsl_info("%s: child %p (state %d)\n", __func__, wsi2, wsi2->state);
+
+		if (wsi2->state == LWSS_HTTP_ISSUING_FILE) {
+
+			wsi2->leave_pollout_active = 0;
+
+			/* >0 == completion, <0 == error
+			 *
+			 * We'll get a LWS_CALLBACK_HTTP_FILE_COMPLETION callback when
+			 * it's done.  That's the case even if we just completed the
+			 * send, so wait for that.
+			 */
+			n = lws_serve_http_file_fragment(wsi2);
+			lwsl_debug("lws_serve_http_file_fragment says %d\n", n);
+
+			if (n == 0)
+				return 1;
+			if (n < 0) {
+				lwsl_debug("Closing POLLOUT child %p\n", wsi2);
+				lws_close_free_wsi(wsi2, LWS_CLOSE_STATUS_NOSTATUS);
+			}
+
+			continue;
+		}
+
 		if (lws_calllback_as_writeable(wsi2)) {
 			lwsl_debug("Closing POLLOUT child\n");
 			lws_close_free_wsi(wsi2, LWS_CLOSE_STATUS_NOSTATUS);

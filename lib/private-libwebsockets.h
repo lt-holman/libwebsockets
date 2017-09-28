@@ -1364,6 +1364,8 @@ struct _lws_http_mode_related {
 	lws_filepos_t content_remain;
 };
 
+#define LWS_HTTP2_FRAME_HEADER_LENGTH 9
+
 #ifdef LWS_WITH_HTTP2
 
 enum lws_http2_settings {
@@ -1402,7 +1404,6 @@ enum lws_http2_flags {
 };
 
 #define LWS_HTTP2_STREAM_ID_MASTER 0
-#define LWS_HTTP2_FRAME_HEADER_LENGTH 9
 #define LWS_HTTP2_SETTINGS_LENGTH 6
 
 struct http2_settings {
@@ -1472,10 +1473,12 @@ struct _lws_http2_related {
 	struct lws *stream_wsi;
 	unsigned char ping_payload[8];
 	unsigned char one_setting[LWS_HTTP2_SETTINGS_LENGTH];
+	char goaway_error_string[32];
 
 	unsigned int count;
 	unsigned int length;
 	unsigned int stream_id;
+	unsigned int inside;
 	enum http2_hpack_state hpack;
 	enum http2_hpack_type hpack_type;
 	unsigned int header_index;
@@ -1485,6 +1488,9 @@ struct _lws_http2_related {
 	unsigned int my_stream_id;
 	unsigned int child_count;
 	int my_priority;
+
+	uint32_t  goaway_last_sid;
+	uint32_t  goaway_error_code;
 
 	unsigned int END_STREAM:1;
 	unsigned int END_HEADERS:1;
@@ -1714,6 +1720,7 @@ struct lws {
 
 	unsigned int hdr_parsing_completed:1;
 	unsigned int http2_substream:1;
+	unsigned int upgraded_to_http2:1;
 	unsigned int listener:1;
 	unsigned int user_space_externally_allocated:1;
 	unsigned int socket_is_permanently_unusable:1;
@@ -1980,6 +1987,8 @@ lws_add_http2_header_status(struct lws *wsi,
 			    unsigned char *end);
 LWS_EXTERN
 void lws_http2_configure_if_upgraded(struct lws *wsi);
+void
+lws_hpack_destroy_dynamic_header(struct lws *wsi);
 #else
 #define lws_http2_configure_if_upgraded(x)
 #endif

@@ -702,6 +702,9 @@ void SSL_get0_alpn_selected(const SSL *ssl, const unsigned char **data,
 	const char *alp = mbedtls_ssl_get_alpn_protocol(&((struct ssl_pm *)(ssl->ssl_pm))->ssl);
 
 	*data = (const unsigned char *)alp;
-	*len = strlen(alp);
+	if (alp)
+		*len = strlen(alp);
+	else
+		*len = 0;
 }
 

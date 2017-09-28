@@ -1,7 +1,7 @@
 /*
  * lib/hpack.c
  *
- * Copyright (C) 2014 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2014-2017 Andy Green <andy@warmcat.com>
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Lesser General Public
@@ -328,6 +328,19 @@ bail1:
 	return ret;
 }
 
+void
+lws_hpack_destroy_dynamic_header(struct lws *wsi)
+{
+	struct hpack_dynamic_table *dyn = wsi->u.http2.hpack_dyn_table;
+
+	if (!dyn)
+		return;
+
+	lws_free_set_NULL(dyn->entries);
+	lws_free_set_NULL(dyn->args);
+	lws_free_set_NULL(wsi->u.http2.hpack_dyn_table);
+}
+
 static int lws_write_indexed_hdr(struct lws *wsi, int idx)
 {
 	const char *p;
@@ -550,8 +563,9 @@ pre_data:
 				c1 = wsi->u.http2.hpack_pos & 0x7fff;
 				wsi->u.http2.hpack_pos = 0;
 
-				if (!c1 && prev == HUFTABLE_0x100_PREV)
+				if (!c1 && prev == HUFTABLE_0x100_PREV) {
 					; /* EOT */
+				}
 			} else {
 				n = 8;
 				c1 = c;
@@ -637,8 +651,7 @@ static int lws_http2_num(int starting_bits, unsigned long num,
 	return 0;
 }
 
-int lws_add_http2_header_by_name(struct lws *wsi,
-				 const unsigned char *name,
+int lws_add_http2_header_by_name(struct lws *wsi, const unsigned char *name,
 				 const unsigned char *value, int length,
 				 unsigned char **p, unsigned char *end)
 {
@@ -685,9 +698,8 @@ int lws_add_http2_header_by_token(struct lws *wsi, enum lws_token_indexes token,
 	return lws_add_http2_header_by_name(wsi, name, value, length, p, end);
 }
 
-int lws_add_http2_header_status(struct lws *wsi,
-			        unsigned int code, unsigned char **p,
-				unsigned char *end)
+int lws_add_http2_header_status(struct lws *wsi, unsigned int code,
+				unsigned char **p, unsigned char *end)
 {
 	unsigned char status[10];
 	int n;

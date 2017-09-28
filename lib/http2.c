@@ -1,7 +1,7 @@
 /*
  * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2010-2013 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010-2017 Andy Green <andy@warmcat.com>
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Lesser General Public
@@ -39,19 +39,6 @@ void lws_http2_init(struct http2_settings *settings)
 }
 
 struct lws *
-lws_http2_wsi_from_id(struct lws *wsi, unsigned int sid)
-{
-	do {
-		if (wsi->u.http2.my_stream_id == sid)
-			return wsi;
-
-		wsi = wsi->u.http2.next_child_wsi;
-	} while (wsi);
-
-	return NULL;
-}
-
-struct lws *
 lws_create_server_child_wsi(struct lws_vhost *vhost, struct lws *parent_wsi,
 			    unsigned int sid)
 {
@@ -69,6 +56,7 @@ lws_create_server_child_wsi(struct lws_vhost *vhost, struct lws *parent_wsi,
 	lws_http2_init(&wsi->u.http2.my_settings);
 	wsi->u.http2.stream_id = sid;
 	wsi->u.http2.my_stream_id = sid;
+	wsi->http2_substream = 1;
 
 	wsi->u.http2.parent_wsi = parent_wsi;
 	wsi->u.http2.next_child_wsi = parent_wsi->u.http2.next_child_wsi;
@@ -96,6 +84,23 @@ bail:
 	lws_free(wsi);
 
 	return NULL;
+}
+
+struct lws *
+lws_http2_wsi_from_id(struct lws *wsi, unsigned int sid)
+{
+	struct lws *orig_wsi = wsi;
+
+	do {
+		if (wsi->u.http2.my_stream_id == sid)
+			return wsi;
+
+		wsi = wsi->u.http2.next_child_wsi;
+	} while (wsi);
+
+	return lws_create_server_child_wsi(orig_wsi->vhost, orig_wsi, sid);
+
+	//return NULL;
 }
 
 int lws_remove_server_child_wsi(struct lws_context *context, struct lws *wsi)
@@ -232,12 +237,14 @@ lws_http2_parser(struct lws *wsi, unsigned char c)
 
 	case LWSS_HTTP2_ESTABLISHED_PRE_SETTINGS:
 	case LWSS_HTTP2_ESTABLISHED:
+		//lwsl_notice("%s: LWSS_HTTP2_ESTABLISHED: wsi %p: %p\n", __func__, wsi, wsi->u.http2.stream_wsi);
 		if (wsi->u.http2.frame_state == LWS_HTTP2_FRAME_HEADER_LENGTH) { // payload
 			wsi->u.http2.count++;
 			wsi->u.http2.stream_wsi->u.http2.count = wsi->u.http2.count;
 			/* applies to wsi->u.http2.stream_wsi which may be wsi*/
 			switch(wsi->u.http2.type) {
 			case LWS_HTTP2_FRAME_TYPE_SETTINGS:
+				lwsl_info(" LWS_HTTP2_FRAME_TYPE_SETTINGS: %02X\n", c);
 				wsi->u.http2.stream_wsi->u.http2.one_setting[wsi->u.http2.count % LWS_HTTP2_SETTINGS_LENGTH] = c;
 				if (wsi->u.http2.count % LWS_HTTP2_SETTINGS_LENGTH == LWS_HTTP2_SETTINGS_LENGTH - 1)
 					if (lws_http2_interpret_settings_payload(
@@ -248,7 +255,7 @@ lws_http2_parser(struct lws *wsi, unsigned char c)
 				break;
 			case LWS_HTTP2_FRAME_TYPE_CONTINUATION:
 			case LWS_HTTP2_FRAME_TYPE_HEADERS:
-				lwsl_info(" %02X\n", c);
+				lwsl_info(" LWS_HTTP2_FRAME_TYPE_HEADERS: %02X\n", c);
 				if (!wsi->u.http2.stream_wsi->u.hdr.ah)
 					if (lws_header_table_attach(wsi->u.http2.stream_wsi, 0)) {
 						lwsl_err("%s: Failed to get ah\n", __func__);
@@ -289,6 +296,11 @@ lws_http2_parser(struct lws *wsi, unsigned char c)
 				wsi->u.http2.hpack_e_dep <<= 8;
 				wsi->u.http2.hpack_e_dep |= c;
 				break;
+			default:
+				lwsl_notice("%s: unhandled frame type %d\n",
+					    __func__, wsi->u.http2.type);
+
+				return 1;
 			}
 			if (wsi->u.http2.count != wsi->u.http2.length)
 				break;
@@ -305,9 +317,13 @@ lws_http2_parser(struct lws *wsi, unsigned char c)
 				wsi->u.http2.initialized = 1;
 			}
 			switch (wsi->u.http2.type) {
+			case LWS_HTTP2_FRAME_TYPE_SETTINGS:
+				break;
 			case LWS_HTTP2_FRAME_TYPE_HEADERS:
 				/* service the http request itself */
-				lwsl_info("servicing initial http request, wsi=%p, stream wsi=%p\n", wsi, wsi->u.http2.stream_wsi);
+				lwsl_info("servicing initial http request, wsi=%p, stream wsi=%p\n", wsi, swsi);
+				swsi->hdr_parsing_completed = 1;
+
 				n = lws_http_action(swsi);
 				(void)n;
 				lwsl_info("  action result %d\n", n);
@@ -329,9 +345,46 @@ lws_http2_parser(struct lws *wsi, unsigned char c)
 					lws_callback_on_writable(swsi);
 				}
 				break;
+			case LWS_HTTP2_FRAME_TYPE_GOAWAY:
+				lwsl_info("  %s: GOAWAY\n", __func__);
+				switch (wsi->u.http2.inside++) {
+				case 0:
+				case 1:
+				case 2:
+				case 3:
+					wsi->u.http2.goaway_last_sid <<= 8;
+					wsi->u.http2.goaway_last_sid |= c;
+					wsi->u.http2.goaway_error_string[0] = '\0';
+					break;
+
+				case 4:
+				case 5:
+				case 6:
+				case 7:
+					wsi->u.http2.goaway_error_code <<= 8;
+					wsi->u.http2.goaway_error_code |= c;
+					break;
+
+				default:
+					if (wsi->u.http2.inside - 9 < sizeof(wsi->u.http2.goaway_error_string) - 1)
+						wsi->u.http2.goaway_error_string[wsi->u.http2.inside - 9] = c;
+					wsi->u.http2.goaway_error_string[sizeof(wsi->u.http2.goaway_error_string) - 1] = '\0';
+					break;
+				}
+				if (wsi->u.http2.inside == wsi->u.http2.length) {
+					lwsl_info("GOAWAY: last sid %d, error code 0x%08X, string %s\n",
+						    wsi->u.http2.goaway_last_sid,
+						    wsi->u.http2.goaway_error_code,
+						    wsi->u.http2.goaway_error_string);
+
+					return 1;
+				}
+				break;
 			}
 			break;
-		}
+		} else
+			wsi->u.http2.inside = 0;
+
 		switch (wsi->u.http2.frame_state++) {
 		case 0:
 			wsi->u.http2.length = c;
@@ -347,6 +400,7 @@ lws_http2_parser(struct lws *wsi, unsigned char c)
 		case 4:
 			wsi->u.http2.flags = c;
 			break;
+
 		case 5:
 		case 6:
 		case 7:
@@ -390,11 +444,9 @@ lws_http2_parser(struct lws *wsi, unsigned char c)
 				lwsl_info("LWS_HTTP2_FRAME_TYPE_HEADERS: stream_id = %d\n", wsi->u.http2.stream_id);
 				if (!wsi->u.http2.stream_id)
 					return 1;
-				if (!wsi->u.http2.stream_wsi) {
+				if (!wsi->u.http2.stream_wsi)
 					wsi->u.http2.stream_wsi =
 						lws_create_server_child_wsi(wsi->vhost, wsi, wsi->u.http2.stream_id);
-					wsi->u.http2.stream_wsi->http2_substream = 1;
-				}
 
 				/* END_STREAM means after servicing this, close the stream */
 				wsi->u.http2.END_STREAM = !!(wsi->u.http2.flags & LWS_HTTP2_FLAG_END_STREAM);
@@ -406,7 +458,6 @@ update_end_headers:
 				swsi = wsi->u.http2.stream_wsi;
 				if (!swsi)
 					return 1;
-
 
 				/* prepare the hpack parser at the right start */
 
@@ -488,10 +539,9 @@ int lws_http2_do_pps_send(struct lws_context *context, struct lws *wsi)
 			 * as the first job.  These need to get
 			 * shifted to stream ID 1
 			 */
-			lwsl_info("%s: setting up sid 1\n", __func__);
-
 			swsi = wsi->u.http2.stream_wsi =
 					lws_create_server_child_wsi(wsi->vhost, wsi, 1);
+
 			/* pass on the initial headers to SID 1 */
 			swsi->u.http.ah = wsi->u.http.ah;
 			wsi->u.http.ah = NULL;

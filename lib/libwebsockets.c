@@ -106,6 +106,11 @@ lws_free_wsi(struct lws *wsi)
 	wsi->peer = NULL;
 #endif
 
+#if defined(LWS_WITH_HTTP2)
+	if (wsi->upgraded_to_http2 || wsi->http2_substream)
+		lws_hpack_destroy_dynamic_header(wsi);
+#endif
+
 	lws_pt_unlock(pt);
 
 	/* since we will destroy the wsi, make absolutely sure now */
@@ -336,6 +341,25 @@ lws_close_free_wsi(struct lws *wsi, enum lws_close_status reason)
 		}
 		wsi->child_list = NULL;
 	}
+
+#if defined(LWS_WITH_HTTP2)
+	if (wsi->upgraded_to_http2 || wsi->http2_substream) {
+		wsi2 = wsi->u.http2.next_child_wsi;
+		while (wsi2) {
+			wsi->u.http2.next_child_wsi = wsi2->u.http2.next_child_wsi;
+			wsi2->u.http2.next_child_wsi = NULL;
+			lwsl_debug("closing http2 child %p\n", wsi2);
+			lws_close_free_wsi(wsi2, reason);
+			wsi2 = wsi->u.http2.next_child_wsi;
+		}
+
+		if (wsi->u.http2.parent_wsi) {
+			wsi->u.http2.parent_wsi->u.http2.child_count--;
+			wsi->u.http2.parent_wsi = NULL;
+		}
+	}
+
+#endif
 
 	if (wsi->mode == LWSCM_RAW_FILEDESC) {
 			lws_remove_child_from_any_parent(wsi);
